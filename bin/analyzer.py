@@ -74,7 +74,11 @@ def analysis(p, initial_storage=dict(),
                      max_calls=3, controlled_addrs=set(), flags=None):
 
     user_alerts = {'Unbounded-Loop':'Unbounded loop condition', \
-                   'DoS-With-Failed-Call': 'DoS-With-Failed-Call'}     
+                   'DoS-With-Failed-Call': 'DoS with a failed call'}
+    swc_mappings = {
+        'Unbounded-Loop': 'SWC-128',
+        'DoS-With-Failed-Call': 'SWC-113' 
+    }
     flags = flags or set(opcodes.CRITICAL)    
     tainting_type='storage'  
     ##convert_to_ssa
@@ -89,10 +93,14 @@ def analysis(p, initial_storage=dict(),
     asserts_count = 0
     temp_slots_count = 0
     slot_live_access_count = 0
-    
+    stdout = ''
+    bug_addr = {
+        'Unbounded-Loop': [],
+        'DoS-With-Failed-Call': []
+    }
     for defect_type in list(['Unbounded-Loop','DoS-With-Failed-Call']):
-        print("Checking contract for \033[4m{0}\033[0m ".format(defect_type))
-        print("------------------\n")            
+        stdout += f'>> Checking contract for {swc_mappings[defect_type]}: {defect_type}\n'
+
         ins=[]
         taintedBy = []
         
@@ -111,8 +119,10 @@ def analysis(p, initial_storage=dict(),
             restricted=True           
         else:
             ins = []
-        if not ins:        
-            continue                
+        
+        if not ins:
+            continue            
+        
         vulnerable_loops = []
         loops_with_calls = []
         analysis_results.analyzed_sinks()            
@@ -150,12 +160,12 @@ def analysis(p, initial_storage=dict(),
                         elif defect_type in (['Hardcoded-Gas']):
                             harcoded_count+=1
                         if defect_type not in (['Unbounded-Loop','DoS-With-Failed-Call']):                                               
-                            print("{0} at statment {1} in function: {2}".format(user_alerts[i_r.defect_type], i, cinfo.get_function_sig(p, i_path)))                            
-                            print("------------------\n")                     
+                            stdout += "\n{0} at statment {1} in function: {2}".format(user_alerts[i_r.defect_type], i, cinfo.get_function_sig(p, i_path))                        
+                            stdout += "\n------------------\n"                   
                     elif defect_type in (['Gas-Griefing']) and len([v for i in i_r.sources for k, v in i.items() if not k.startswith('SLOAD')])!=0:
                         griefing_count+=1
-                        print("{0} at statment {1} in function: {2}".format(user_alerts[i_r.defect_type], i, cinfo.get_function_sig(p, i_path)))
-                        print("------------------\n")                        
+                        stdout += "\n{0} at statment {1} in function: {2}".format(user_alerts[i_r.defect_type], i, cinfo.get_function_sig(p, i_path))
+                        stdout += "\n------------------\n"               
                     else:                                                        
                         sstores = p.cfg.filter_ins('SSTORE', reachable=True)                                                                                          
                         sstore_sinks={s.addr:[1] for s in sstores}  
@@ -175,44 +185,53 @@ def analysis(p, initial_storage=dict(),
                                 elif defect_type in (['Hardcoded-Gas']):
                                     harcoded_count+=1                                    
                                 if defect_type not in (['Unbounded-Loop','DoS-With-Failed-Call']):                                               
-                                    print("{0} at statment {1} in function: {2}".format(user_alerts[i_r.defect_type], i, cinfo.get_function_sig(p, i_path)))
-                                    print("------------------\n")   
-                                break                  
-        if defect_type in (['Unbounded-Loop']):             
-            for l, hd in loops.items():             
+                                    stdout += "\n{0} at statment {1} in function: {2}".format(user_alerts[i_r.defect_type], i, cinfo.get_function_sig(p, i_path))
+                                    stdout += "\n------------------\n"
+                                break
+        
+        if defect_type in (['Unbounded-Loop']):
+            for l, hd in loops.items():
                 r=0     
                 v_ins= [b for b in vulnerable_loops if b['block'] in set(hd[1:])]                                
                 no_storage_tnt= [b for b in vulnerable_loops if b['block'] in set(hd[1:]) and b['increased_in'] is None]
                 if len(v_ins)!=0:                                                                
                     if (hd[0]<3 and len(no_storage_tnt)!=0):
                         continue
-                    print("{0} in function: {1}".format(user_alerts[i_r.defect_type], v_ins[0]['function']))                                                                                           
+                    stdout += f'\n{user_alerts[defect_type]} found in function: {v_ins[0]["function"]}'
+                    addresses = []
                     for v in v_ins:
                         if v['increased_in'] is not None:
                             if v['increase_restricted']:
                                 r+=1
-                                print("Following loop bound is tainted in function {0} (restricted calls)".format(v['increased_in']))                                                                            
+                                stdout += "\nFollowing loop bound is tainted in function {0} (restricted calls)".format(v['increased_in'])                                                                         
                             else:
-                                print("Following loop bound is tainted in function {0}".format(v['increased_in']))                                                                            
-                        print(v['ins'])                                                             
-                    print('\n')     
+                                stdout += "\nFollowing loop bound is tainted in function {0}".format(v['increased_in'])                                                      
+                        stdout += f'\n{v["ins"]}'
+                        addresses.append(f'0x{v["ins"].addr:08x}')                                                          
+                    stdout += '\n\n'
                     if r==0:          
                         unbounded_count+=1
                     else:
                         unbounded_restr_count+=1
+                    bug_addr['Unbounded-Loop'].append(addresses)
+
         if defect_type in (['DoS-With-Failed-Call']):                                                                                                
             for l, hd in loops.items():           
                 r1=0 
                 v_ins= [b for b in loops_with_calls if b['block'] in set([l])]
-                if len(v_ins)!=0:                             
-                    loop_calls_count+=1                                                   
-                    print("{0} in function: {1}".format(user_alerts[i_r.defect_type], v_ins[0]['function']))                                                                       
+                if len(v_ins)!=0:                                                                             
+                    stdout += f'\n{user_alerts[defect_type]} found in function: {v_ins[0]["function"]}'
+                    addresses = []
                     for v in v_ins:
                         if v['increased_in'] is not None:
-                            print("Following call target is tainted in function {0}".format(v['increased_in']))
-                        print(v['ins'])                                       
-                    print('\n')               
-    return TainitAnalysisBugDetails(unbounded_count, unbounded_restr_count, loop_calls_count, griefing_count, harcoded_count, asserts_count, slot_live_access_count, temp_slots_count)
+                            stdout += "\nFollowing call target is tainted in function {0}".format(v['increased_in'])
+                        stdout += f'\n{v["ins"]}'
+                        addresses.append(f'0x{v["ins"].addr:08x}')                                                            
+                    stdout += '\n\n'
+                    loop_calls_count+=1
+                    bug_addr['DoS-With-Failed-Call'].append(addresses)
+    
+    return TainitAnalysisBugDetails(stdout, bug_addr, unbounded_count, unbounded_restr_count, loop_calls_count, griefing_count, harcoded_count, asserts_count, slot_live_access_count, temp_slots_count)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -268,17 +287,20 @@ def main():
     else:
         tainting_type ='storage'
     
+    contracts_analysis_results = []
     if not args.bytecode:
         contracts = get_evm(args.file)
         # Analyze each contract
         for cname, bin_str in contracts:
-            print("Contract {0}:".format(cname))                    
-            print("------------------\n")            
+            stdout = ("\nContract {0}:".format(cname))                    
+            stdout += ("\n------------------\n")            
             code = bytes.fromhex(bin_str)            
             p = Project(code)
             with open('%s.project.json' % savefilebase, 'w') as f:
                 json.dump(p.to_json(), f)                                  
-            analysis(p, initial_storage=initial_storage)            
+            analysis_result: TainitAnalysisBugDetails = analysis(p, initial_storage=initial_storage)
+            analysis_result.stdout = stdout + analysis_result.stdout 
+            contracts_analysis_results.append(analysis_result)
     else:
         with open(args.file)  as infile:
             inbuffer = infile.read().rstrip()            
@@ -286,7 +308,32 @@ def main():
         p = Project(code)
         with open('%s.project.json' % savefilebase, 'w') as f:
             json.dump(p.to_json(), f)                    
-        analysis(p, initial_storage=initial_storage)        
+        analysis_result = analysis(p, initial_storage=initial_storage)
+        contracts_analysis_results.append(analysis_result)
+    
+    return contracts_analysis_results
+
                 
-if __name__ == '__main__':    
-    main()
+if __name__ == '__main__':
+    # run the analysis
+    start_time = time.time()
+    contacts_analysis_results = main()
+    end_time = time.time()
+
+    # we only pass one bytecode conract
+    analysis_results: TainitAnalysisBugDetails = contacts_analysis_results[0]
+    
+    # print analysis summary
+    print('============ Results ===========')
+    print(f'Unbounded Loop: {analysis_results.unbounded_loops + analysis_results.fun_call_restr > 0}')
+    if analysis_results.unbounded_loops + analysis_results.fun_call_restr > 0:
+        print(f'  > Num of Incidents: {analysis_results.unbounded_loops + analysis_results.fun_call_restr}')
+        print(f'  > PC Address: {analysis_results.print_bug_addresses("Unbounded-Loop")}')
+    print(f'DoS with Failed Call: {analysis_results.loops_with_calls > 0}')
+    if analysis_results.loops_with_calls > 0:
+        print(f'  > Num of Incidents: {analysis_results.loops_with_calls}')
+        print(f'  > PC Address: {analysis_results.print_bug_addresses("DoS-With-Failed-Call")}')
+    print(f'--- {end_time - start_time:.6f} seconds ---')
+    print('====== Analysis Completed ======')
+    print('\n')
+    print(analysis_results.stdout)
